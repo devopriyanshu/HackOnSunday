@@ -1,0 +1,18 @@
+sunday1_ai_browser_agent/venv/
+
+# Ignore environment variable files
+sunday1_ai_browser_agent/.env
+
+# Python cache files
+__pycache__/
+*.py[co
+*.egg-info/
+
+# VSCode settings (optional)
+.vscode/
+
+# macOS system files
+.DS_Store
+
+sunday1_ai_browser_agent/__pycache__/
+sunday1_ai_browser_agent/**/*.pyc
