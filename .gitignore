@@ -7,7 +7,9 @@ sunday1_ai_browser_agent/.env
 __pycache__/
 *.py[co
 *.egg-info/
-
+*.pyc
+*.pyo
+*.pyd
 # VSCode settings (optional)
 .vscode/
 
