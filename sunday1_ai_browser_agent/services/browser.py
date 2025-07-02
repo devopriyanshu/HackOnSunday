@@ -1,4 +1,3 @@
-# browser.py - Complete robust implementation
 from playwright.async_api import async_playwright
 import asyncio
 import random
@@ -6,6 +5,7 @@ import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 import time
+import json
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -24,7 +24,6 @@ class BrowserController:
         self.start_time = time.time()
 
     async def start(self) -> None:
-        """Initialize browser with anti-detection measures"""
         try:
             self.playwright = await async_playwright().start()
             self.browser = await self.playwright.chromium.launch(
@@ -54,7 +53,6 @@ class BrowserController:
             raise
 
     async def execute_actions(self, actions: List[Dict]) -> Dict[str, Any]:
-        """Execute actions with comprehensive error handling"""
         results = {
             "success": True,
             "actions": [],
@@ -63,15 +61,17 @@ class BrowserController:
             "duration": 0
         }
 
-        try:
-            if not self.page or self.page.is_closed():
-                await self.start()
+        if not self.page or self.page.is_closed():
+            await self.start()
 
+        try:
             for action in actions:
+                logger.info(f"➡️ Executing action: {json.dumps(action)}")
                 await self._human_delay()
                 action_result = await self._execute_single_action(action)
                 results["actions"].append(action_result)
-                
+                logger.info(f"✅ Completed action: {action_result['action']} | Success: {action_result['success']}")
+
                 if not action_result["success"]:
                     results["success"] = False
                     if await self._check_captcha():
@@ -93,14 +93,16 @@ class BrowserController:
                 "status": "failed"
             })
             if self.page and not self.page.is_closed():
-                screenshot = await self._take_screenshot("error_final")
-                results["screenshots"].append(screenshot)
+                try:
+                    screenshot = await self._take_screenshot("error_final")
+                    results["screenshots"].append(screenshot)
+                except:
+                    pass
 
         results["duration"] = round(time.time() - self.start_time, 2)
         return results
 
     async def _execute_single_action(self, action: Dict) -> Dict[str, Any]:
-        """Execute a single action with validation"""
         action_type = action.get("type", "unknown")
         result = {
             "action": action_type,
@@ -115,73 +117,44 @@ class BrowserController:
 
             result["details"] = await handler(action)
             result["success"] = True
-            
+
             if self.page and not self.page.is_closed():
                 result["screenshot"] = await self._take_screenshot(f"action_{action_type}")
 
         except Exception as e:
             logger.error(f"Action {action_type} failed: {str(e)}")
             result["error"] = str(e)
-            if self.page and not self.page.is_closed():
-                try:
-                    result["screenshot"] = await self._take_screenshot(f"failed_{action_type}")
-                except Exception as screenshot_error:
-                    logger.error(f"Failed to take screenshot: {str(screenshot_error)}")
-            raise
+            try:
+                result["screenshot"] = await self._take_screenshot(f"failed_{action_type}")
+            except Exception as screenshot_error:
+                logger.warning(f"Screenshot failed for {action_type}: {screenshot_error}")
 
         return result
 
     async def _handle_navigate(self, action: Dict) -> Dict:
-        """Handle navigation to URLs"""
-        if "url" not in action:
-            raise ValueError("Navigate action requires 'url' parameter")
-        
-        await self.page.goto(action["url"], timeout=60000, wait_until="networkidle")
-        await self._human_delay()
-        return {"url": action["url"], "status": "loaded"}
+        url = action.get("url")
+        if not url:
+            raise ValueError("Navigate action requires 'url'")
+
+        await self.page.goto(url, timeout=60000, wait_until="networkidle")
+        await self._human_delay(1.5, 2.5)
+        return {"url": url, "status": "loaded"}
 
     async def _handle_input(self, action: Dict) -> Dict:
-        """Handle text input with validation"""
         text = action.get("text") or action.get("value")
         if not text:
             raise ValueError("Input action requires 'text' or 'value'")
-        
         element = await self._locate_element(action)
         await self._human_type(element, text)
-        return {
-            "element": action.get("selector") or action.get("element_description"),
-            "text": text[:50] + "..." if len(text) > 50 else text
-        }
+        return {"element": action.get("selector"), "text": text}
 
     async def _handle_click(self, action: Dict) -> Dict:
-        """Handle element clicking"""
         element = await self._locate_element(action)
         await self._human_click(element)
-        return {"element": action.get("selector") or action.get("element_description")}
-
-    async def _handle_submit(self, action: Dict) -> Dict:
-        """Handle form submission"""
-        await self.page.keyboard.press("Enter")
-        await self._human_delay()
-        return {"method": "keyboard_enter"}
-
-    async def _handle_scroll(self, action: Dict) -> Dict:
-        """Handle page scrolling"""
-        direction = action.get("direction", "down")
-        amount = max(100, min(2000, action.get("amount", 500)))
-        
-        if direction == "down":
-            await self.page.mouse.wheel(0, amount)
-        else:
-            await self.page.mouse.wheel(0, -amount)
-            
-        await self._human_delay()
-        return {"direction": direction, "pixels": amount}
+        return {"element": action.get("selector")}
 
     async def _handle_wait(self, action: Dict) -> Dict:
-        """Handle waiting operations"""
         timeout = max(1000, min(10000, action.get("timeout", 5000)))
-        
         if "selector" in action:
             await self.page.wait_for_selector(action["selector"], timeout=timeout)
             return {"wait_for": "selector", "selector": action["selector"]}
@@ -190,84 +163,49 @@ class BrowserController:
             return {"wait_for": "timeout", "ms": timeout}
 
     async def _locate_element(self, action: Dict) -> Any:
-        """Smart element location with fallbacks"""
-        strategies = []
-        
-        # Priority 1: Explicit selector
         if "selector" in action:
-            return await self.page.wait_for_selector(
-                action["selector"],
-                timeout=action.get("timeout", 5000),
-                state="attached"
-            )
-        
-        # Priority 2: Element description
-        if "element_description" in action:
-            desc = action["element_description"]
-            strategies.extend([
-                f"text={desc} >> visible=true",
-                f"[aria-label='{desc}'] >> visible=true",
-                f"[placeholder='{desc}'] >> visible=true",
-                f"text={desc}",
-                f":has-text('{desc}')"
-            ])
-        
-        # Priority 3: Fallback selectors
-        strategies.extend(action.get("fallbacks", []))
-        
-        # Try all strategies
-        for selector in strategies:
-            try:
-                element = await self.page.wait_for_selector(
-                    selector,
-                    timeout=2000,
-                    state="attached"
-                )
-                if element:
-                    return element
-            except Exception:
-                continue
-        
-        raise ValueError(f"Element not found using any strategy: {action}")
+            return await self.page.wait_for_selector(action["selector"], timeout=5000)
 
-    async def _human_delay(self) -> None:
-        """Randomized delay between actions"""
-        await asyncio.sleep(random.uniform(0.5, 2.0))
+        for fallback in action.get("fallbacks", []):
+            try:
+                return await self.page.wait_for_selector(fallback, timeout=2000)
+            except:
+                continue
+
+        raise ValueError(f"Element not found using selector or fallbacks: {action}")
+
+    async def _human_delay(self, min_delay=0.5, max_delay=1.5) -> None:
+        await asyncio.sleep(random.uniform(min_delay, max_delay))
 
     async def _human_type(self, element: Any, text: str) -> None:
-        """Human-like typing simulation"""
-        await element.click()
-        await asyncio.sleep(random.uniform(0.1, 0.3))
+        await element.click(force=True)
+        await asyncio.sleep(0.2)
         for char in text:
             await element.type(char)
-            await asyncio.sleep(random.uniform(0.05, 0.2))
+            await asyncio.sleep(random.uniform(0.05, 0.15))
 
     async def _human_click(self, element: Any) -> None:
-        """Human-like clicking simulation"""
         await element.hover()
-        await asyncio.sleep(random.uniform(0.1, 0.5))
+        await asyncio.sleep(0.2)
         await element.click(delay=random.randint(50, 150))
 
     async def _take_screenshot(self, name: str) -> str:
-        """Capture and save screenshot"""
         path = str(self.screenshots_dir / f"{name}_{int(time.time())}.png")
         await self.page.screenshot(path=path, full_page=True)
         return path
 
     async def _check_captcha(self) -> bool:
-        """Check for CAPTCHA presence"""
-        return await self.page.query_selector("#captcha, .g-recaptcha, #recaptcha")
+        return await self.page.query_selector("#captcha, .g-recaptcha, #recaptcha") is not None
 
     async def close(self) -> None:
-        """Proper resource cleanup"""
         try:
-            if hasattr(self, 'page') and self.page and not self.page.is_closed():
+            if self.page and not self.page.is_closed():
                 await self.page.close()
-            if hasattr(self, 'context') and self.context:
+            if self.context:
                 await self.context.close()
-            if hasattr(self, 'browser') and self.browser:
+            if self.browser:
                 await self.browser.close()
-            if hasattr(self, 'playwright') and self.playwright:
+            if self.playwright:
                 await self.playwright.stop()
             logger.info("Resources cleaned up successfully")
         except Exception as e:
@@ -277,11 +215,3 @@ class BrowserController:
             self.context = None
             self.browser = None
             self.playwright = None
-
-async def run_workflow(actions: List[Dict]) -> Dict:
-    """Helper function to run actions in a managed session"""
-    controller = BrowserController(headless=False)
-    try:
-        return await controller.execute_actions(actions)
-    finally:
-        await controller.close()

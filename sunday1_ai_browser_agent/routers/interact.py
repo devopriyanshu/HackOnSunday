@@ -1,19 +1,23 @@
-# interact.py - with fixed controller handling
-
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from typing import List, Dict, Optional, Any
 from services.parser import parse_command
 from services.browser import BrowserController
+import json
 import logging
+import sys
+import uuid
+
+# Set up logging
+logging.basicConfig(stream=sys.stdout, level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
-logger = logging.getLogger(__name__)
 
 class CommandRequest(BaseModel):
     command: str
-    debug: bool = False  # Optional debug flag
-    headless: bool = False  # Option to run browser in headless mode
+    debug: bool = False
+    headless: bool = False
 
 class ActionResponse(BaseModel):
     action: str
@@ -38,43 +42,38 @@ class DirectActionRequest(BaseModel):
 
 @router.post("/interact", response_model=ExecutionResult)
 async def interact(request: CommandRequest):
-    """
-    Execute a natural language browser command
-    
-    Parameters:
-    - command: The natural language instruction
-    - debug: If True, returns additional debug information
-    - headless: If True, runs browser in headless mode
-    
-    Returns:
-    - Detailed execution results including screenshots
-    """
     if not request.command:
         raise HTTPException(status_code=400, detail="Missing command")
-    
+
     controller = None
+    request_id = str(uuid.uuid4())
+    logger.info(f"[{request_id}] 📥 Received command: {request.command}")
+
     try:
-        # Step 1: Parse the natural language command
         parsed = await parse_command(request.command)
-        if "error" in parsed:
-            raise HTTPException(status_code=400, detail=parsed["error"])
-        
-        logger.info(f"Parsed actions: {parsed['actions']}")
-        
-        # Step 2: Execute the browser actions
+        logger.info(f"[{request_id}] 🧠 Parsed command object:\n%s", json.dumps(parsed, indent=2))
+
+        if not parsed or not isinstance(parsed, dict) or "actions" not in parsed:
+            raise HTTPException(status_code=400, detail="Invalid parsed command format")
+
         controller = BrowserController(headless=request.headless)
+        logger.info(f"[{request_id}] 🚀 Starting browser with headless={request.headless}")
         results = await controller.execute_actions(parsed["actions"])
-        
-        # Build the response with proper null handling
+
         response_data = {
             "command": request.command,
             "success": results["success"],
             "actions": [],
             "screenshots": results.get("screenshots", []),
-            "final_url": controller.page.url if controller.page and hasattr(controller.page, 'url') else None
+            "final_url": None
         }
-        
-        # Transform actions to include all optional fields
+
+        try:
+            if controller.page and not controller.page.is_closed():
+                response_data["final_url"] = controller.page.url
+        except Exception:
+            pass
+
         for action_result in results.get("actions", []):
             response_data["actions"].append({
                 "action": action_result.get("action", ""),
@@ -83,8 +82,7 @@ async def interact(request: CommandRequest):
                 "screenshot": action_result.get("screenshot"),
                 "error": action_result.get("error")
             })
-        
-        # Include additional debug info if requested
+
         if request.debug:
             response_data["debug"] = {
                 "parsed_command": parsed,
@@ -93,47 +91,58 @@ async def interact(request: CommandRequest):
                     "page_ready": controller.page is not None
                 }
             }
-        
-        # Validate against our model before returning
+
+        logger.info(f"[{request_id}] ✅ Actions executed successfully")
         return ExecutionResult(**response_data)
-        
+
     except Exception as e:
-        logger.error(f"Error processing command: {str(e)}", exc_info=True)
+        logger.error(f"[{request_id}] ❌ Error processing command: {str(e)}", exc_info=True)
+        debug_info = None
+        if request.debug:
+            debug_info = {
+                "trace": repr(e),
+                "parsed_command": parsed if "parsed" in locals() else None
+            }
         return ExecutionResult(
             command=request.command,
             success=False,
             actions=[],
             screenshots=[],
-            error=str(e)
+            error=str(e),
+            debug=debug_info
         )
+
     finally:
-        # Ensure we always try to close the browser
         if controller:
             try:
                 await controller.close()
             except Exception as e:
-                logger.error(f"Error closing browser: {str(e)}")
+                logger.error(f"[{request_id}] Error closing browser: {str(e)}")
 
 @router.post("/actions", response_model=ExecutionResult)
 async def execute_actions(request: DirectActionRequest):
-    """
-    Directly execute a list of browser actions (for testing/debugging)
-    """
     controller = None
+    request_id = str(uuid.uuid4())
+    logger.info(f"[{request_id}] 🛠️ Direct action request: %s", json.dumps(request.dict(), indent=2))
+
     try:
         controller = BrowserController(headless=request.headless)
         results = await controller.execute_actions(request.actions)
-        
-        # Build response
+
         response_data = {
             "command": "Direct action execution",
             "success": results["success"],
             "actions": results.get("actions", []),
             "screenshots": results.get("screenshots", []),
-            "final_url": controller.page.url if controller.page and hasattr(controller.page, 'url') else None
+            "final_url": None
         }
-        
-        # Include debug info if requested
+
+        try:
+            if controller.page and not controller.page.is_closed():
+                response_data["final_url"] = controller.page.url
+        except Exception:
+            pass
+
         if request.debug:
             response_data["debug"] = {
                 "browser_state": {
@@ -141,10 +150,12 @@ async def execute_actions(request: DirectActionRequest):
                     "page_ready": controller.page is not None
                 }
             }
-        
+
+        logger.info(f"[{request_id}] ✅ Direct actions executed successfully")
         return ExecutionResult(**response_data)
+
     except Exception as e:
-        logger.error(f"Error executing actions: {str(e)}", exc_info=True)
+        logger.error(f"[{request_id}] ❌ Error executing actions: {str(e)}", exc_info=True)
         return ExecutionResult(
             command="Direct action execution",
             success=False,
@@ -152,10 +163,10 @@ async def execute_actions(request: DirectActionRequest):
             screenshots=[],
             error=str(e)
         )
+
     finally:
-        # Ensure we always try to close the browser
         if controller:
             try:
                 await controller.close()
             except Exception as e:
-                logger.error(f"Error closing the browser: {str(e)}")
+                logger.error(f"[{request_id}] Error closing the browser: {str(e)}")
